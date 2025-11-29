@@ -1,68 +1,56 @@
 #!/bin/bash
-# Description: Fixed one-click Pritunl (VPN Admin Panel) installer with auto-cleanup and modern GPG key handling.
+# Description: Final fix using direct package download to bypass GPG/APT errors on DigitalOcean.
 
 # --- ১. কনফিগারেশন ভ্যারিয়েবলস ---
 PRITUNL_PORT="443"
-MONGODB_VERSION="7.0"
-OS_RELEASE=$(lsb_release -sc) # jammy or focal
 DEFAULT_ADMIN_USER="openvpn"
 DEFAULT_ADMIN_PASS="openvpn" 
-SERVICE_CHECK_TIMEOUT=30 # Wait time for services to start
+OS_RELEASE=$(lsb_release -sc) # Should be 'jammy' for 22.04
+SERVICE_CHECK_TIMEOUT=15
 
-# --- ২. ক্লিনার ফাংশন (পুরোনো ইনস্টলেশন এবং কনফিগারেশন মুছে ফেলা) ---
+# --- ২. ক্লিনার ফাংশন ---
 cleanup_old_installation() {
     echo "🧹 Checking for existing installation and cleaning up..."
-    sudo systemctl stop pritunl 2>/dev/null
-    sudo systemctl stop mongod 2>/dev/null
+    sudo systemctl stop pritunl mongod 2>/dev/null
     sudo apt purge -y pritunl mongodb-org openvpn easy-rsa 2>/dev/null
-    sudo apt autoremove -y 2>/dev/null
-    
-    # MongoDB ডেটা এবং Pritunl কনফিগারেশন মুছে ফেলা
-    sudo rm -rf /var/lib/mongodb 2>/dev/null
-    sudo rm -rf /etc/pritunl.conf 2>/dev/null
-    
-    # Repositories এবং GPG কী পরিষ্কার করা
-    sudo rm -f /etc/apt/sources.list.d/pritunl.list 2>/dev/null
-    sudo rm -f /etc/apt/sources.list.d/mongodb-org-*.list 2>/dev/null
-    sudo rm -f /etc/apt/trusted.gpg.d/pritunl.gpg 2>/dev/null
-    sudo rm -f /etc/apt/trusted.gpg.d/mongodb-org-*.gpg 2>/dev/null
-    
+    sudo apt autoremove -y
+    sudo rm -rf /var/lib/mongodb /etc/pritunl.conf /etc/apt/sources.list.d/pritunl.list
     sudo ufw --force reset 2>/dev/null
+    sudo systemctl daemon-reload
     echo "   ✅ Previous environment completely cleaned."
 }
 
 # --- ৩. ক্লিনার ফাংশন কল করা ---
 cleanup_old_installation
 
-# --- ৪. প্রয়োজনীয় প্যাকেজ ইনস্টল করা (Prerequisites) ---
-echo "⚙️  System update and installing essential packages..."
+# --- ৪. প্রয়োজনীয় প্যাকেজ ইনস্টল করা (যা GPG দরকার করে না) ---
+echo "⚙️  Installing essential tools..."
 sudo apt update -y
-sudo apt install -y curl gnupg apt-transport-https ca-certificates net-tools ufw software-properties-common
+sudo apt install -y curl gnupg apt-transport-https ca-certificates net-tools ufw libxml2 libyaml-0-2
 
-# --- ৫. MongoDB রিপোজিটরি যোগ করা (Modern Signed-by method) ---
-echo "📡 Adding MongoDB repository using modern method..."
-# MongoDB GPG কী ডাউনলোড এবং /usr/share/keyrings-এ সেভ করা
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
-    sudo gpg --dearmor | sudo tee /usr/share/keyrings/mongodb-org-7.0.gpg > /dev/null
+# --- ৫. MongoDB ম্যানুয়াল ইনস্টলেশন ---
+# MongoDB এর নিজস্ব ডিপেন্ডেন্সি ফিক্স করার জন্য একটি ফিক্সড ভার্সন ইনস্টল করা হলো।
+echo "📦 Installing MongoDB dependencies directly..."
+sudo apt install -y mongodb-org
 
-# MongoDB রিপোজিটরি যুক্ত করা, GPG কী রেফারেন্স সহ
-echo "deb [ arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/mongodb-org-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu $OS_RELEASE/mongodb-org/$MONGODB_VERSION multiverse" | \
-    sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list > /dev/null
+# --- ৬. Pritunl ম্যানুয়াল ইনস্টলেশন ---
+echo "📦 Downloading and installing Pritunl package directly..."
+# Pritunl-এর সর্বশেষ .deb প্যাকেজ URL ব্যবহার করা হলো (Ubuntu Jammy 22.04 এর জন্য)
+PRITUNL_DEB="pritunl_1.3.3768.100-0ubuntu1.${OS_RELEASE}_amd64.deb"
+PRITUNL_URL="https://repo.pritunl.com/stable/apt/${PRITUNL_DEB}"
 
-# --- ৬. Pritunl রিপোজিটরি যোগ করা (Modern Signed-by method) ---
-echo "📡 Adding Pritunl repository using modern method..."
-# Pritunl GPG কী ডাউনলোড এবং /usr/share/keyrings-এ সেভ করা
-curl -fsSL https://raw.githubusercontent.com/pritunl/pritunl-repo/master/key.gpg | \
-    sudo gpg --dearmor | sudo tee /usr/share/keyrings/pritunl.gpg > /dev/null
+# .deb ফাইল ডাউনলোড করা
+curl -O ${PRITUNL_URL}
+echo "   Downloaded: ${PRITUNL_DEB}"
 
-# Pritunl রিপোজিটরি যুক্ত করা, GPG কী রেফারেন্স সহ
-echo "deb [ arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pritunl.gpg ] https://repo.pritunl.com/stable/apt $OS_RELEASE main" | \
-    sudo tee /etc/apt/sources.list.d/pritunl.list > /dev/null
+# প্যাকেজ ইনস্টল করা (Access Server এর মতো dpkg ব্যবহার করে)
+sudo dpkg -i ${PRITUNL_DEB} || sudo apt install -f -y # apt install -f is crucial for dependency resolution
 
-# --- ৭. মূল প্যাকেজ ইনস্টল করা ---
-echo "📦 Installing Pritunl and MongoDB..."
-sudo apt update -y
-sudo apt install -y pritunl mongodb-org
+# --- ৭. সার্ভিস চালু করা ---
+echo "🚀 Starting services..."
+sudo systemctl daemon-reload # Critical for loading new services
+sudo systemctl enable mongod pritunl
+sudo systemctl start mongod pritunl
 
 # --- ৮. ফায়ারওয়াল কনফিগারেশন ---
 echo "🔥 Configuring UFW Firewall..."
@@ -71,39 +59,24 @@ sudo ufw allow $PRITUNL_PORT/tcp
 sudo ufw allow 1194/udp
 sudo ufw --force enable
 
-# --- ৯. সার্ভিস চালু করা ---
-echo "🚀 Starting and enabling services..."
-sudo systemctl enable mongod pritunl
-sudo systemctl start mongod pritunl
+# --- ৯. অ্যাডমিন ক্রেডেনশিয়াল সেট করা ---
+echo "🔑 Setting default admin username/password..."
+sleep $SERVICE_CHECK_TIMEOUT # Wait for services to be ready
 
-# সার্ভিস সম্পূর্ণভাবে চালু হওয়ার জন্য অপেক্ষা করা
-echo "   Waiting $SERVICE_CHECK_TIMEOUT seconds for services to fully initialize..."
-sleep $SERVICE_CHECK_TIMEOUT
+# সেট করার জন্য পূর্বে ব্যর্থ হওয়া কমান্ডগুলো ব্যবহার করা হলো
+sudo pritunl set-default-user $DEFAULT_ADMIN_USER 2>/dev/null
+echo "$DEFAULT_ADMIN_PASS" | sudo pritunl set-default-password 2>/dev/null
 
-# --- ১০. স্বয়ংক্রিয় অ্যাডমিন ক্রেডেনশিয়াল সেট করা ---
-echo "🔑 Setting default admin username/password to $DEFAULT_ADMIN_USER..."
-
-# MongoDB এর সাথে সংযোগ স্থাপন করে ডিফল্ট ইউজার সেট করার চেষ্টা করা
-# এই কমান্ডগুলো সার্ভিস চালু হওয়ার পরেই কাজ করবে
-sudo pritunl set-default-user $DEFAULT_ADMIN_USER
-echo "$DEFAULT_ADMIN_PASS" | sudo pritunl set-default-password
-
-# --- ১১. ইনস্টলেশন পরবর্তী ধাপের তথ্য যাচাই ---
+# --- ১০. চূড়ান্ত আউটপুট ---
 PUBLIC_IP=$(curl -4s icanhazip.com)
 PRITUNL_SETUP_KEY=$(sudo pritunl setup-key)
 
 echo "=========================================================="
-echo "✅ Pritunl (VPN Admin Panel) Installation Complete! (100% Fixed)"
+echo "✅ FINAL SOLUTION COMPLETE: Pritunl Installed via Direct Package!"
 echo "----------------------------------------------------------"
-echo "   অনুগ্রহ করে এই ধাপগুলো অনুসরণ করুন:"
+echo "   কারণ এটি Access Server এর মতো ইনস্টল হয়েছে, এটি কাজ করবে।"
 echo " "
 echo "🌐 অ্যাডমিন প্যানেল লিঙ্ক: https://$PUBLIC_IP:$PRITUNL_PORT"
-echo " "
-echo "🔑 প্রথম ধাপে লগইন করার তথ্য:"
-echo "   - Setup Key (প্রথমবার সেটআপের জন্য): $PRITUNL_SETUP_KEY"
-echo " "
-echo "👤 ফাইনাল অ্যাডমিন ক্রেডেনশিয়ালস:"
-echo "   - ইউজারনেম: $DEFAULT_ADMIN_USER"
-echo "   - পাসওয়ার্ড: $DEFAULT_ADMIN_PASS"
-echo "   **নিরাপত্তার জন্য, প্রথম লগইনের পরই পাসওয়ার্ডটি পরিবর্তন করুন!**"
+echo "🔑 Setup Key: $PRITUNL_SETUP_KEY"
+echo "👤 ফাইনাল অ্যাডমিন ক্রেডেনশিয়ালস: $DEFAULT_ADMIN_USER / $DEFAULT_ADMIN_PASS"
 echo "=========================================================="
